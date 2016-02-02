@@ -181,6 +181,34 @@ class ApplicationDelegate
     new Disposable ->
       ipc.removeListener('message', outerCallback)
 
+  onDidBeginCheckingForUpdate: (callback) ->
+    outerCallback = (message, detail) ->
+      if message is 'checking-for-update'
+        callback(detail)
+
+    ipc.on('message', outerCallback)
+    new Disposable ->
+      ipc.removeListener('message', outerCallback)
+
+  onDidCompleteDownloadingUpdate: (callback) ->
+    outerCallback = (message, detail) ->
+      if message is 'update-downloaded'
+        callback(detail)
+
+    ipc.on('message', outerCallback)
+    new Disposable ->
+      ipc.removeListener('message', outerCallback)
+
+  onUpdateNotAvailable: (callback) ->
+    outerCallback = (message, detail) ->
+      if message is 'update-not-available'
+        callback(detail)
+
+    ipc.on('message', outerCallback)
+    new Disposable ->
+      ipc.removeListener('message', outerCallback)
+
+
   onApplicationMenuCommand: (callback) ->
     ipc.on('command', callback)
     new Disposable ->
