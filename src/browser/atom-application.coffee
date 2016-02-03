@@ -283,6 +283,9 @@ class AtomApplication
     ipc.on 'add-recent-document', (event, filename) ->
       app.addRecentDocument(filename)
 
+    ipc.on 'check-for-update', =>
+      @autoUpdateManager.check()
+
   setupDockMenu: ->
     if process.platform is 'darwin'
       dockMenu = Menu.buildFromTemplate [
