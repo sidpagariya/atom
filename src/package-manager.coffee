@@ -39,12 +39,15 @@ class PackageManager
     @activationHookEmitter = new Emitter
     @packageDirPaths = []
     @deferredActivationHooks = []
+    @triggeredActivationHooks = new Set()
     if configDirPath? and not safeMode
       if @devMode
         @packageDirPaths.push(path.join(configDirPath, "dev", "packages"))
       @packageDirPaths.push(path.join(configDirPath, "packages"))
 
     @packagesCache = require('../package.json')?._atomPackages ? {}
+    @initialPackagesLoaded = false
+    @initialPackagesActivated = false
     @loadedPackages = {}
     @activePackages = {}
     @activatingPackages = {}
@@ -65,6 +68,7 @@ class PackageManager
     @deactivatePackages()
     @loadedPackages = {}
     @packageStates = {}
+    @triggeredActivationHooks.clear()
 
   ###
   Section: Event Subscription
@@ -128,8 +132,12 @@ class PackageManager
 
   # Public: Get the path to the apm command.
   #
+  # Uses the value of the `core.apmPath` config setting if it exists.
+  #
   # Return a {String} file path to apm.
   getApmPath: ->
+    configPath = atom.config.get('core.apmPath')
+    return configPath if configPath
     return @apmPath if @apmPath?
 
     commandName = 'apm'
@@ -237,6 +245,9 @@ class PackageManager
   isPackageActive: (name) ->
     @getActivePackage(name)?
 
+  # Public: Returns a {Boolean} indicating whether package activation has occurred.
+  hasActivatedInitialPackages: -> @initialPackagesActivated
+
   ###
   Section: Accessing loaded packages
   ###
@@ -267,6 +278,9 @@ class PackageManager
   isPackageLoaded: (name) ->
     @getLoadedPackage(name)?
 
+  # Public: Returns a {Boolean} indicating whether package loading has occurred.
+  hasLoadedInitialPackages: -> @initialPackagesLoaded
+
   ###
   Section: Accessing available packages
   ###
@@ -280,7 +294,7 @@ class PackageManager
         packagePaths.push(packagePath) if fs.isDirectorySync(packagePath)
 
     packagesPath = path.join(@resourcePath, 'node_modules')
-    for packageName, packageVersion of @getPackageDependencies()
+    for packageName of @getPackageDependencies()
       packagePath = path.join(packagesPath, packageName)
       packagePaths.push(packagePath) if fs.isDirectorySync(packagePath)
 
@@ -357,10 +371,15 @@ class PackageManager
     packagePaths = @getAvailablePackagePaths()
     packagePaths = packagePaths.filter (packagePath) => not @isPackageDisabled(path.basename(packagePath))
     packagePaths = _.uniq packagePaths, (packagePath) -> path.basename(packagePath)
-    @loadPackage(packagePath) for packagePath in packagePaths
+    @config.transact =>
+      @loadPackage(packagePath) for packagePath in packagePaths
+      return
+    @initialPackagesLoaded = true
     @emitter.emit 'did-load-initial-packages'
 
   loadPackage: (nameOrPath) ->
+    return null if path.basename(nameOrPath)[0].match /^\./ # primarily to skip .git folder
+
     return pack if pack = @getLoadedPackage(nameOrPath)
 
     if packagePath = @resolvePackagePath(nameOrPath)
@@ -418,6 +437,7 @@ class PackageManager
       promises = promises.concat(activator.activatePackages(packages))
     Promise.all(promises).then =>
       @triggerDeferredActivationHooks()
+      @initialPackagesActivated = true
       @emitter.emit 'did-activate-initial-packages'
 
   # another type of package manager can handle other package types.
@@ -442,12 +462,17 @@ class PackageManager
       Promise.resolve(pack)
     else if pack = @loadPackage(name)
       @activatingPackages[pack.name] = pack
-      pack.activate().then =>
+      activationPromise = pack.activate().then =>
         if @activatingPackages[pack.name]?
           delete @activatingPackages[pack.name]
           @activePackages[pack.name] = pack
           @emitter.emit 'did-activate-package', pack
         pack
+
+      unless @deferredActivationHooks?
+        @triggeredActivationHooks.forEach((hook) => @activationHookEmitter.emit(hook))
+
+      activationPromise
     else
       Promise.reject(new Error("Failed to load package '#{name}'"))
 
@@ -458,6 +483,7 @@ class PackageManager
 
   triggerActivationHook: (hook) ->
     return new Error("Cannot trigger an empty activation hook") unless hook? and _.isString(hook) and hook.length > 0
+    @triggeredActivationHooks.add(hook)
     if @deferredActivationHooks?
       @deferredActivationHooks.push hook
     else
@@ -467,19 +493,26 @@ class PackageManager
     return unless hook? and _.isString(hook) and hook.length > 0
     @activationHookEmitter.on(hook, callback)
 
+  serialize: ->
+    for pack in @getActivePackages()
+      @serializePackage(pack)
+    @packageStates
+
+  serializePackage: (pack) ->
+    @setPackageState(pack.name, state) if state = pack.serialize?()
+
   # Deactivate all packages
   deactivatePackages: ->
     @config.transact =>
-      @deactivatePackage(pack.name) for pack in @getLoadedPackages()
+      @deactivatePackage(pack.name, true) for pack in @getLoadedPackages()
       return
     @unobserveDisabledPackages()
     @unobservePackagesWithKeymapsDisabled()
 
   # Deactivate the package with the given name
-  deactivatePackage: (name) ->
+  deactivatePackage: (name, suppressSerialization) ->
     pack = @getLoadedPackage(name)
-    if @isPackageActive(name)
-      @setPackageState(pack.name, state) if state = pack.serialize?()
+    @serializePackage(pack) if not suppressSerialization and @isPackageActive(pack.name)
     pack.deactivate()
     delete @activePackages[pack.name]
     delete @activatingPackages[pack.name]
@@ -532,11 +565,12 @@ class PackageManager
     unless typeof metadata.name is 'string' and metadata.name.length > 0
       metadata.name = packageName
 
+    if metadata.repository?.type is 'git' and typeof metadata.repository.url is 'string'
+      metadata.repository.url = metadata.repository.url.replace(/(^git\+)|(\.git$)/g, '')
+
     metadata
 
   normalizePackageMetadata: (metadata) ->
     unless metadata?._id
       normalizePackageData ?= require 'normalize-package-data'
       normalizePackageData(metadata)
-      if metadata.repository?.type is 'git' and typeof metadata.repository.url is 'string'
-        metadata.repository.url = metadata.repository.url.replace(/^git\+/, '')

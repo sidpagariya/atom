@@ -214,7 +214,6 @@ class CommandRegistry
     immediatePropagationStopped = false
     matched = false
     currentTarget = event.target
-    {preventDefault, stopPropagation, stopImmediatePropagation, abortKeyBinding} = event
 
     dispatchedEvent = new CustomEvent(event.type, {bubbles: true, detail: event.detail})
     Object.defineProperty dispatchedEvent, 'eventPhase', value: Event.BUBBLING_PHASE
@@ -244,11 +243,14 @@ class CommandRegistry
           (@selectorBasedListenersByCommandName[event.type] ? [])
             .filter (listener) -> currentTarget.webkitMatchesSelector(listener.selector)
             .sort (a, b) -> a.compare(b)
-        listeners = listeners.concat(selectorBasedListeners)
+        listeners = selectorBasedListeners.concat(listeners)
 
       matched = true if listeners.length > 0
 
-      for listener in listeners
+      # Call inline listeners first in reverse registration order,
+      # and selector-based listeners by specificity and reverse
+      # registration order.
+      for listener in listeners by -1
         break if immediatePropagationStopped
         listener.callback.call(currentTarget, dispatchedEvent)
 
@@ -271,8 +273,8 @@ class SelectorBasedListener
     @sequenceNumber = SequenceCount++
 
   compare: (other) ->
-    other.specificity - @specificity  or
-      other.sequenceNumber - @sequenceNumber
+    @specificity - other.specificity or
+      @sequenceNumber - other.sequenceNumber
 
 class InlineListener
   constructor: (@callback) ->

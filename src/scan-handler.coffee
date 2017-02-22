@@ -1,12 +1,9 @@
-_ = require "underscore-plus"
 path = require "path"
 async = require "async"
 {PathSearcher, PathScanner, search} = require 'scandal'
 
 module.exports = (rootPaths, regexSource, options) ->
   callback = @async()
-
-  rootPath = rootPaths[0]
 
   PATHS_COUNTER_SEARCHED_CHUNK = 50
   pathsSearched = 0
@@ -26,7 +23,7 @@ module.exports = (rootPaths, regexSource, options) ->
   async.each(
     rootPaths,
     (rootPath, next) ->
-      options2 = _.extend {}, options,
+      options2 = Object.assign {}, options,
         inclusions: processPaths(rootPath, options.inclusions)
         globalExclusions: processPaths(rootPath, options.globalExclusions)
 

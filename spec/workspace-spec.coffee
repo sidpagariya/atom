@@ -1,8 +1,8 @@
 path = require 'path'
-temp = require 'temp'
+temp = require('temp').track()
+TextEditor = require '../src/text-editor'
 Workspace = require '../src/workspace'
 Project = require '../src/project'
-Pane = require '../src/pane'
 platform = require './spec-helper-platform'
 _ = require 'underscore-plus'
 fstream = require 'fstream'
@@ -19,20 +19,24 @@ describe "Workspace", ->
     atom.project.setPaths([atom.project.getDirectories()[0]?.resolve('dir')])
     waits(1)
 
+  afterEach ->
+    temp.cleanupSync()
+
   describe "serialization", ->
     simulateReload = ->
       workspaceState = atom.workspace.serialize()
-      projectState = atom.project.serialize()
+      projectState = atom.project.serialize({isUnloading: true})
       atom.workspace.destroy()
       atom.project.destroy()
-      atom.project = new Project({notificationManager: atom.notifications, packageManager: atom.packages, confirm: atom.confirm.bind(atom)})
-      atom.project.deserialize(projectState, atom.deserializers)
+      atom.project = new Project({notificationManager: atom.notifications, packageManager: atom.packages, confirm: atom.confirm.bind(atom), applicationDelegate: atom.applicationDelegate})
+      atom.project.deserialize(projectState)
       atom.workspace = new Workspace({
         config: atom.config, project: atom.project, packageManager: atom.packages,
         grammarRegistry: atom.grammars, deserializerManager: atom.deserializers,
-        notificationManager: atom.notifications, clipboard: atom.clipboard,
+        notificationManager: atom.notifications,
         applicationDelegate: atom.applicationDelegate,
         viewRegistry: atom.views, assert: atom.assert.bind(atom),
+        textEditorRegistry: atom.textEditors
       })
       atom.workspace.deserialize(workspaceState, atom.deserializers)
 
@@ -80,7 +84,8 @@ describe "Workspace", ->
           expect(untitledEditor.getText()).toBe("An untitled editor.")
 
           expect(atom.workspace.getActiveTextEditor().getPath()).toBe editor3.getPath()
-          expect(document.title).toMatch ///^#{path.basename(editor3.getLongTitle())}\ \u2014\ #{atom.project.getPaths()[0]}///
+          pathEscaped = fs.tildify(escapeStringRegex(atom.project.getPaths()[0]))
+          expect(document.title).toMatch ///^#{path.basename(editor3.getLongTitle())}\ \u2014\ #{pathEscaped}///
 
     describe "where there are no open panes or editors", ->
       it "constructs the view with no open editors", ->
@@ -428,11 +433,11 @@ describe "Workspace", ->
           workspace.open('sample.js').then (e) -> editor = e
 
         runs ->
-          expect(editor.displayBuffer.largeFileMode).toBe true
+          expect(editor.largeFileMode).toBe true
 
-    describe "when the file is over 20MB", ->
-      it "prompts the user to make sure they want to open a file this big", ->
-        spyOn(fs, 'getSizeSync').andReturn 20 * 1048577 # 20MB
+    describe "when the file is over user-defined limit", ->
+      shouldPromptForFileOfSize = (size, shouldPrompt) ->
+        spyOn(fs, 'getSizeSync').andReturn size * 1048577
         atom.applicationDelegate.confirm.andCallFake -> selectedButtonIndex
         atom.applicationDelegate.confirm()
         selectedButtonIndex = 1 # cancel
@@ -440,20 +445,35 @@ describe "Workspace", ->
         editor = null
         waitsForPromise ->
           workspace.open('sample.js').then (e) -> editor = e
+        if shouldPrompt
+          runs ->
+            expect(editor).toBeUndefined()
+            expect(atom.applicationDelegate.confirm).toHaveBeenCalled()
 
-        runs ->
-          expect(editor).toBeUndefined()
-          expect(atom.applicationDelegate.confirm).toHaveBeenCalled()
+            atom.applicationDelegate.confirm.reset()
+            selectedButtonIndex = 0 # open the file
 
-          atom.applicationDelegate.confirm.reset()
-          selectedButtonIndex = 0 # open the file
+          waitsForPromise ->
+            workspace.open('sample.js').then (e) -> editor = e
 
-        waitsForPromise ->
-          workspace.open('sample.js').then (e) -> editor = e
+          runs ->
+            expect(atom.applicationDelegate.confirm).toHaveBeenCalled()
+            expect(editor.largeFileMode).toBe true
+        else
+          runs ->
+            expect(editor).not.toBeUndefined()
 
-        runs ->
-          expect(atom.applicationDelegate.confirm).toHaveBeenCalled()
-          expect(editor.displayBuffer.largeFileMode).toBe true
+      it "prompts the user to make sure they want to open a file this big", ->
+        atom.config.set "core.warnOnLargeFileLimit", 20
+        shouldPromptForFileOfSize 20, true
+
+      it "doesn't prompt on files below the limit", ->
+        atom.config.set "core.warnOnLargeFileLimit", 30
+        shouldPromptForFileOfSize 20, false
+
+      it "prompts for smaller files with a lower limit", ->
+        atom.config.set "core.warnOnLargeFileLimit", 5
+        shouldPromptForFileOfSize 10, true
 
     describe "when passed a path that matches a custom opener", ->
       it "returns the resource returned by the custom opener", ->
@@ -472,6 +492,7 @@ describe "Workspace", ->
             expect(item).toEqual {bar: "bar://baz"}
 
     it "adds the file to the application's recent documents list", ->
+      return unless process.platform is 'darwin' # Feature only supported on macOS
       spyOn(atom.applicationDelegate, 'addRecentDocument')
 
       waitsForPromise ->
@@ -585,6 +606,100 @@ describe "Workspace", ->
           open = -> workspace.open('file1', workspace.getActivePane())
           expect(open).toThrow()
 
+    describe "when the file is already open in pending state", ->
+      it "should terminate the pending state", ->
+        editor = null
+        pane = null
+
+        waitsForPromise ->
+          atom.workspace.open('sample.js', pending: true).then (o) ->
+            editor = o
+            pane = atom.workspace.getActivePane()
+
+        runs ->
+          expect(pane.getPendingItem()).toEqual editor
+
+        waitsForPromise ->
+          atom.workspace.open('sample.js')
+
+        runs ->
+          expect(pane.getPendingItem()).toBeNull()
+
+    describe "when opening will switch from a pending tab to a permanent tab", ->
+      it "keeps the pending tab open", ->
+        editor1 = null
+        editor2 = null
+
+        waitsForPromise ->
+          atom.workspace.open('sample.txt').then (o) ->
+            editor1 = o
+
+        waitsForPromise ->
+          atom.workspace.open('sample2.txt', pending: true).then (o) ->
+            editor2 = o
+
+        runs ->
+          pane = atom.workspace.getActivePane()
+          pane.activateItem(editor1)
+          expect(pane.getItems().length).toBe 2
+          expect(pane.getItems()).toEqual [editor1, editor2]
+
+    describe "when replacing a pending item which is the last item in a second pane", ->
+      it "does not destroy the pane even if core.destroyEmptyPanes is on", ->
+        atom.config.set('core.destroyEmptyPanes', true)
+        editor1 = null
+        editor2 = null
+        leftPane = atom.workspace.getActivePane()
+        rightPane = null
+
+        waitsForPromise ->
+          atom.workspace.open('sample.js', pending: true, split: 'right').then (o) ->
+            editor1 = o
+            rightPane = atom.workspace.getActivePane()
+            spyOn rightPane, "destroyed"
+
+        runs ->
+          expect(leftPane).not.toBe rightPane
+          expect(atom.workspace.getActivePane()).toBe rightPane
+          expect(atom.workspace.getActivePane().getItems().length).toBe 1
+          expect(rightPane.getPendingItem()).toBe editor1
+
+        waitsForPromise ->
+          atom.workspace.open('sample.txt', pending: true).then (o) ->
+            editor2 = o
+
+        runs ->
+          expect(rightPane.getPendingItem()).toBe editor2
+          expect(rightPane.destroyed.callCount).toBe 0
+
+  describe 'the grammar-used hook', ->
+    it 'fires when opening a file or changing the grammar of an open file', ->
+      editor = null
+      javascriptGrammarUsed = false
+      coffeescriptGrammarUsed = false
+
+      atom.packages.triggerDeferredActivationHooks()
+
+      runs ->
+        atom.packages.onDidTriggerActivationHook 'language-javascript:grammar-used', -> javascriptGrammarUsed = true
+        atom.packages.onDidTriggerActivationHook 'language-coffee-script:grammar-used', -> coffeescriptGrammarUsed = true
+
+      waitsForPromise ->
+        atom.workspace.open('sample.js', autoIndent: false).then (o) -> editor = o
+
+      waitsForPromise ->
+        atom.packages.activatePackage('language-javascript')
+
+      waitsFor -> javascriptGrammarUsed
+
+      waitsForPromise ->
+        atom.packages.activatePackage('language-coffee-script')
+
+      runs ->
+        editor.setGrammar(atom.grammars.selectGrammar('.coffee'))
+
+      waitsFor -> coffeescriptGrammarUsed
+
   describe "::reopenItem()", ->
     it "opens the uri associated with the last closed pane that isn't currently open", ->
       pane = workspace.getActivePane()
@@ -685,7 +800,7 @@ describe "Workspace", ->
 
   describe "::isTextEditor(obj)", ->
     it "returns true when the passed object is an instance of `TextEditor`", ->
-      expect(workspace.isTextEditor(atom.workspace.buildTextEditor())).toBe(true)
+      expect(workspace.isTextEditor(new TextEditor)).toBe(true)
       expect(workspace.isTextEditor({getText: -> null})).toBe(false)
       expect(workspace.isTextEditor(null)).toBe(false)
       expect(workspace.isTextEditor(undefined)).toBe(false)
@@ -717,6 +832,21 @@ describe "Workspace", ->
         editor.destroy()
         expect(workspace.getTextEditors()).toHaveLength 0
 
+  describe "when an editor is copied because its pane is split", ->
+    it "sets up the new editor to be configured by the text editor registry", ->
+      waitsForPromise ->
+        atom.packages.activatePackage('language-javascript')
+
+      waitsForPromise ->
+        workspace.open('a').then (editor) ->
+          atom.textEditors.setGrammarOverride(editor, 'source.js')
+          expect(editor.getGrammar().name).toBe('JavaScript')
+
+          workspace.getActivePane().splitRight(copyActiveItem: true)
+          newEditor = workspace.getActiveTextEditor()
+          expect(newEditor).not.toBe(editor)
+          expect(newEditor.getGrammar().name).toBe('JavaScript')
+
   it "stores the active grammars used by all the open editors", ->
     waitsForPromise ->
       atom.packages.activatePackage('language-javascript')
@@ -746,20 +876,57 @@ describe "Workspace", ->
       workspace2 = new Workspace({
         config: atom.config, project: atom.project, packageManager: atom.packages,
         notificationManager: atom.notifications, deserializerManager: atom.deserializers,
-        clipboard: atom.clipboard, viewRegistry: atom.views, grammarRegistry: atom.grammars,
-        applicationDelegate: atom.applicationDelegate, assert: atom.assert.bind(atom)
+        viewRegistry: atom.views, grammarRegistry: atom.grammars,
+        applicationDelegate: atom.applicationDelegate, assert: atom.assert.bind(atom),
+        textEditorRegistry: atom.textEditors
       })
       workspace2.deserialize(state, atom.deserializers)
       expect(jsPackage.loadGrammarsSync.callCount).toBe 1
       expect(coffeePackage.loadGrammarsSync.callCount).toBe 1
 
   describe "document.title", ->
-    describe "when the project has no path", ->
-      it "sets the title to 'untitled'", ->
-        atom.project.setPaths([])
-        expect(document.title).toMatch ///^untitled///
+    describe "when there is no item open", ->
+      it "sets the title to the project path", ->
+        expect(document.title).toMatch escapeStringRegex(fs.tildify(atom.project.getPaths()[0]))
 
-    describe "when the project has a path", ->
+      it "sets the title to 'untitled' if there is no project path", ->
+        atom.project.setPaths([])
+        expect(document.title).toMatch /^untitled/
+
+    describe "when the active pane item's path is not inside a project path", ->
+      beforeEach ->
+        waitsForPromise ->
+          atom.workspace.open('b').then ->
+            atom.project.setPaths([])
+
+      it "sets the title to the pane item's title plus the item's path", ->
+        item = atom.workspace.getActivePaneItem()
+        pathEscaped = fs.tildify(escapeStringRegex(path.dirname(item.getPath())))
+        expect(document.title).toMatch ///^#{item.getTitle()}\ \u2014\ #{pathEscaped}///
+
+      describe "when the title of the active pane item changes", ->
+        it "updates the window title based on the item's new title", ->
+          editor = atom.workspace.getActivePaneItem()
+          editor.buffer.setPath(path.join(temp.dir, 'hi'))
+          pathEscaped = fs.tildify(escapeStringRegex(path.dirname(editor.getPath())))
+          expect(document.title).toMatch ///^#{editor.getTitle()}\ \u2014\ #{pathEscaped}///
+
+      describe "when the active pane's item changes", ->
+        it "updates the title to the new item's title plus the project path", ->
+          atom.workspace.getActivePane().activateNextItem()
+          item = atom.workspace.getActivePaneItem()
+          pathEscaped = fs.tildify(escapeStringRegex(path.dirname(item.getPath())))
+          expect(document.title).toMatch ///^#{item.getTitle()}\ \u2014\ #{pathEscaped}///
+
+      describe "when an inactive pane's item changes", ->
+        it "does not update the title", ->
+          pane = atom.workspace.getActivePane()
+          pane.splitRight()
+          initialTitle = document.title
+          pane.activateNextItem()
+          expect(document.title).toBe initialTitle
+
+    describe "when the active pane item is inside a project path", ->
       beforeEach ->
         waitsForPromise ->
           atom.workspace.open('b')
@@ -767,25 +934,28 @@ describe "Workspace", ->
       describe "when there is an active pane item", ->
         it "sets the title to the pane item's title plus the project path", ->
           item = atom.workspace.getActivePaneItem()
-          expect(document.title).toMatch ///^#{item.getTitle()}\ \u2014\ #{atom.project.getPaths()[0]}///
+          pathEscaped = fs.tildify(escapeStringRegex(atom.project.getPaths()[0]))
+          expect(document.title).toMatch ///^#{item.getTitle()}\ \u2014\ #{pathEscaped}///
 
       describe "when the title of the active pane item changes", ->
         it "updates the window title based on the item's new title", ->
           editor = atom.workspace.getActivePaneItem()
-          editor.buffer.setPath(path.join(temp.dir, 'hi'))
-          expect(document.title).toMatch ///^#{editor.getTitle()}\ \u2014\ #{atom.project.getPaths()[0]}///
+          editor.buffer.setPath(path.join(atom.project.getPaths()[0], 'hi'))
+          pathEscaped = fs.tildify(escapeStringRegex(atom.project.getPaths()[0]))
+          expect(document.title).toMatch ///^#{editor.getTitle()}\ \u2014\ #{pathEscaped}///
 
       describe "when the active pane's item changes", ->
         it "updates the title to the new item's title plus the project path", ->
           atom.workspace.getActivePane().activateNextItem()
           item = atom.workspace.getActivePaneItem()
-          expect(document.title).toMatch ///^#{item.getTitle()}\ \u2014\ #{atom.project.getPaths()[0]}///
+          pathEscaped = fs.tildify(escapeStringRegex(atom.project.getPaths()[0]))
+          expect(document.title).toMatch ///^#{item.getTitle()}\ \u2014\ #{pathEscaped}///
 
       describe "when the last pane item is removed", ->
-        it "updates the title to contain the project's path", ->
+        it "updates the title to the project's first path", ->
           atom.workspace.getActivePane().destroy()
           expect(atom.workspace.getActivePaneItem()).toBeUndefined()
-          expect(document.title).toMatch ///^#{atom.project.getPaths()[0]}///
+          expect(document.title).toMatch escapeStringRegex(fs.tildify(atom.project.getPaths()[0]))
 
       describe "when an inactive pane's item changes", ->
         it "does not update the title", ->
@@ -804,12 +974,14 @@ describe "Workspace", ->
         workspace2 = new Workspace({
           config: atom.config, project: atom.project, packageManager: atom.packages,
           notificationManager: atom.notifications, deserializerManager: atom.deserializers,
-          clipboard: atom.clipboard, viewRegistry: atom.views, grammarRegistry: atom.grammars,
-          applicationDelegate: atom.applicationDelegate, assert: atom.assert.bind(atom)
+          viewRegistry: atom.views, grammarRegistry: atom.grammars,
+          applicationDelegate: atom.applicationDelegate, assert: atom.assert.bind(atom),
+          textEditorRegistry: atom.textEditors
         })
         workspace2.deserialize(atom.workspace.serialize(), atom.deserializers)
         item = workspace2.getActivePaneItem()
-        expect(document.title).toMatch ///^#{item.getLongTitle()}\ \u2014\ #{atom.project.getPaths()[0]}///
+        pathEscaped = fs.tildify(escapeStringRegex(atom.project.getPaths()[0]))
+        expect(document.title).toMatch ///^#{item.getLongTitle()}\ \u2014\ #{pathEscaped}///
         workspace2.destroy()
 
   describe "document edited status", ->
@@ -1006,6 +1178,7 @@ describe "Workspace", ->
             range: [[2, 6], [2, 11]]
 
       it "works on evil filenames", ->
+        atom.config.set('core.excludeVcsIgnoredPaths', false)
         platform.generateEvilFiles()
         atom.project.setPaths([path.join(__dirname, 'fixtures', 'evil-files')])
         paths = []
@@ -1091,7 +1264,7 @@ describe "Workspace", ->
           expect(matches.length).toBe 1
 
       it "includes files and folders that begin with a '.'", ->
-        projectPath = temp.mkdirSync()
+        projectPath = temp.mkdirSync('atom-spec-workspace')
         filePath = path.join(projectPath, '.text')
         fs.writeFileSync(filePath, 'match this')
         atom.project.setPaths([projectPath])
@@ -1108,7 +1281,6 @@ describe "Workspace", ->
           expect(matches.length).toBe 1
 
       it "excludes values in core.ignoredNames", ->
-        projectPath = path.join(__dirname, 'fixtures', 'git', 'working-dir')
         ignoredNames = atom.config.get("core.ignoredNames")
         ignoredNames.push("a")
         atom.config.set("core.ignoredNames", ignoredNames)
@@ -1532,3 +1704,75 @@ describe "Workspace", ->
 
       atom.workspace.closeActivePaneItemOrEmptyPaneOrWindow()
       expect(atom.close).toHaveBeenCalled()
+
+  describe "when the core.allowPendingPaneItems option is falsey", ->
+    it "does not open item with `pending: true` option as pending", ->
+      pane = null
+      atom.config.set('core.allowPendingPaneItems', false)
+
+      waitsForPromise ->
+        atom.workspace.open('sample.js', pending: true).then ->
+          pane = atom.workspace.getActivePane()
+
+      runs ->
+        expect(pane.getPendingItem()).toBeFalsy()
+
+  describe "grammar activation", ->
+    it "notifies the workspace of which grammar is used", ->
+      editor = null
+      atom.packages.triggerDeferredActivationHooks()
+
+      javascriptGrammarUsed = jasmine.createSpy('js grammar used')
+      rubyGrammarUsed = jasmine.createSpy('ruby grammar used')
+      cGrammarUsed = jasmine.createSpy('c grammar used')
+
+      atom.packages.onDidTriggerActivationHook('language-javascript:grammar-used', javascriptGrammarUsed)
+      atom.packages.onDidTriggerActivationHook('language-ruby:grammar-used', rubyGrammarUsed)
+      atom.packages.onDidTriggerActivationHook('language-c:grammar-used', cGrammarUsed)
+
+      waitsForPromise -> atom.packages.activatePackage('language-ruby')
+      waitsForPromise -> atom.packages.activatePackage('language-javascript')
+      waitsForPromise -> atom.packages.activatePackage('language-c')
+      waitsForPromise -> atom.workspace.open('sample-with-comments.js')
+
+      runs ->
+        # Hooks are triggered when opening new editors
+        expect(javascriptGrammarUsed).toHaveBeenCalled()
+
+        # Hooks are triggered when changing existing editors grammars
+        atom.workspace.getActiveTextEditor().setGrammar(atom.grammars.grammarForScopeName('source.c'))
+        expect(cGrammarUsed).toHaveBeenCalled()
+
+        # Hooks are triggered when editors are added in other ways.
+        atom.workspace.getActivePane().splitRight(copyActiveItem: true)
+        atom.workspace.getActiveTextEditor().setGrammar(atom.grammars.grammarForScopeName('source.ruby'))
+        expect(rubyGrammarUsed).toHaveBeenCalled()
+
+  describe ".checkoutHeadRevision()", ->
+    editor = null
+    beforeEach ->
+      atom.config.set("editor.confirmCheckoutHeadRevision", false)
+
+      waitsForPromise -> atom.workspace.open('sample-with-comments.js').then (o) -> editor = o
+
+    it "reverts to the version of its file checked into the project repository", ->
+      editor.setCursorBufferPosition([0, 0])
+      editor.insertText("---\n")
+      expect(editor.lineTextForBufferRow(0)).toBe "---"
+
+      waitsForPromise ->
+        atom.workspace.checkoutHeadRevision(editor)
+
+      runs ->
+        expect(editor.lineTextForBufferRow(0)).toBe ""
+
+    describe "when there's no repository for the editor's file", ->
+      it "doesn't do anything", ->
+        editor = new TextEditor
+        editor.setText("stuff")
+        atom.workspace.checkoutHeadRevision(editor)
+
+        waitsForPromise -> atom.workspace.checkoutHeadRevision(editor)
+
+  escapeStringRegex = (str) ->
+    str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&')

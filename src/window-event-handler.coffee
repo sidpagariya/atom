@@ -1,6 +1,4 @@
-path = require 'path'
 {Disposable, CompositeDisposable} = require 'event-kit'
-fs = require 'fs-plus'
 listen = require './delegated-listener'
 
 # Handles low-level events related to the @window.
@@ -10,17 +8,26 @@ class WindowEventHandler
     @reloadRequested = false
     @subscriptions = new CompositeDisposable
 
-    @previousOnbeforeunloadHandler = @window.onbeforeunload
-    @window.onbeforeunload = @handleWindowBeforeunload
+    @addEventListener(@window, 'beforeunload', @handleWindowBeforeunload)
     @addEventListener(@window, 'focus', @handleWindowFocus)
     @addEventListener(@window, 'blur', @handleWindowBlur)
 
-    @addEventListener(@document, 'keydown', @handleDocumentKeydown)
+    @addEventListener(@document, 'keyup', @handleDocumentKeyEvent)
+    @addEventListener(@document, 'keydown', @handleDocumentKeyEvent)
     @addEventListener(@document, 'drop', @handleDocumentDrop)
     @addEventListener(@document, 'dragover', @handleDocumentDragover)
     @addEventListener(@document, 'contextmenu', @handleDocumentContextmenu)
     @subscriptions.add listen(@document, 'click', 'a', @handleLinkClick)
     @subscriptions.add listen(@document, 'submit', 'form', @handleFormSubmit)
+
+    browserWindow = @applicationDelegate.getCurrentWindow()
+    browserWindow.on 'enter-full-screen', @handleEnterFullScreen
+    @subscriptions.add new Disposable =>
+      browserWindow.removeListener('enter-full-screen', @handleEnterFullScreen)
+
+    browserWindow.on 'leave-full-screen', @handleLeaveFullScreen
+    @subscriptions.add new Disposable =>
+      browserWindow.removeListener('leave-full-screen', @handleLeaveFullScreen)
 
     @subscriptions.add @atomEnvironment.commands.add @window,
       'window:toggle-full-screen': @handleWindowToggleFullScreen
@@ -53,7 +60,6 @@ class WindowEventHandler
     bindCommandToAction('core:cut', 'cut')
 
   unsubscribe: ->
-    @window.onbeforeunload = @previousOnbeforeunloadHandler
     @subscriptions.dispose()
 
   on: (target, eventName, handler) ->
@@ -66,7 +72,7 @@ class WindowEventHandler
     target.addEventListener(eventName, handler)
     @subscriptions.add(new Disposable(-> target.removeEventListener(eventName, handler)))
 
-  handleDocumentKeydown: (event) =>
+  handleDocumentKeyEvent: (event) =>
     @atomEnvironment.keymaps.handleKeyboardEvent(event)
     event.stopImmediatePropagation()
 
@@ -133,25 +139,28 @@ class WindowEventHandler
 
   handleWindowBlur: =>
     @document.body.classList.add('is-blurred')
-    @atomEnvironment.storeDefaultWindowDimensions()
+    @atomEnvironment.storeWindowDimensions()
 
-  handleWindowBeforeunload: =>
-    confirmed = @atomEnvironment.workspace?.confirmClose(windowCloseRequested: true)
+  handleEnterFullScreen: =>
+    @document.body.classList.add("fullscreen")
+
+  handleLeaveFullScreen: =>
+    @document.body.classList.remove("fullscreen")
+
+  handleWindowBeforeunload: (event) =>
+    projectHasPaths = @atomEnvironment.project.getPaths().length > 0
+    confirmed = @atomEnvironment.workspace?.confirmClose(windowCloseRequested: true, projectHasPaths: projectHasPaths)
     if confirmed and not @reloadRequested and not @atomEnvironment.inSpecMode() and @atomEnvironment.getCurrentWindow().isWebViewFocused()
       @atomEnvironment.hide()
     @reloadRequested = false
 
-    @atomEnvironment.storeDefaultWindowDimensions()
     @atomEnvironment.storeWindowDimensions()
     if confirmed
       @atomEnvironment.unloadEditorWindow()
+      @atomEnvironment.destroy()
     else
       @applicationDelegate.didCancelWindowUnload()
-
-    confirmed
-
-  handleWindowUnload: =>
-    @atomEnvironment.destroy()
+      event.returnValue = false
 
   handleWindowToggleFullScreen: =>
     @atomEnvironment.toggleFullScreen()

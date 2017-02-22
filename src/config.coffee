@@ -1,6 +1,6 @@
 _ = require 'underscore-plus'
 fs = require 'fs-plus'
-{CompositeDisposable, Disposable, Emitter} = require 'event-kit'
+{Emitter} = require 'event-kit'
 CSON = require 'season'
 path = require 'path'
 async = require 'async'
@@ -80,7 +80,7 @@ ScopeDescriptor = require './scope-descriptor'
 #   # ...
 # ```
 #
-# See [package docs](https://atom.io/docs/latest/hacking-atom-package-word-count) for
+# See [package docs](http://flight-manual.atom.io/hacking-atom/sections/package-word-count/) for
 # more info.
 #
 # ## Config Schemas
@@ -319,6 +319,48 @@ ScopeDescriptor = require './scope-descriptor'
 # * line breaks - `line breaks<br/>`
 # * ~~strikethrough~~ - `~~strikethrough~~`
 #
+# #### order
+#
+# The settings view orders your settings alphabetically. You can override this
+# ordering with the order key.
+#
+# ```coffee
+# config:
+#   zSetting:
+#     type: 'integer'
+#     default: 4
+#     order: 1
+#   aSetting:
+#     type: 'integer'
+#     default: 4
+#     order: 2
+# ```
+#
+# ## Manipulating values outside your configuration schema
+#
+# It is possible to manipulate(`get`, `set`, `observe` etc) values that do not
+# appear in your configuration schema. For example, if the config schema of the
+# package 'some-package' is
+#
+# ```coffee
+# config:
+# someSetting:
+#   type: 'boolean'
+#   default: false
+# ```
+#
+# You can still do the following
+#
+# ```coffee
+# let otherSetting  = atom.config.get('some-package.otherSetting')
+# atom.config.set('some-package.stillAnotherSetting', otherSetting * 5)
+# ```
+#
+# In other words, if a function asks for a `key-path`, that path doesn't have to
+# be described in the config schema for the package or any package. However, as
+# highlighted in the best practices section, you are advised against doing the
+# above.
+#
 # ## Best practices
 #
 # * Don't depend on (or write to) configuration keys outside of your keypath.
@@ -407,7 +449,7 @@ class Config
   #   * `scope` (optional) {ScopeDescriptor} describing a path from
   #     the root of the syntax tree to a token. Get one by calling
   #     {editor.getLastCursor().getScopeDescriptor()}. See {::get} for examples.
-  #     See [the scopes docs](https://atom.io/docs/latest/behind-atom-scoped-settings-scopes-and-scope-descriptors)
+  #     See [the scopes docs](http://flight-manual.atom.io/behind-atom/sections/scoped-settings-scopes-and-scope-descriptors/)
   #     for more information.
   # * `callback` {Function} to call when the value of the key changes.
   #   * `value` the new value of the key
@@ -438,7 +480,7 @@ class Config
   #   * `scope` (optional) {ScopeDescriptor} describing a path from
   #     the root of the syntax tree to a token. Get one by calling
   #     {editor.getLastCursor().getScopeDescriptor()}. See {::get} for examples.
-  #     See [the scopes docs](https://atom.io/docs/latest/behind-atom-scoped-settings-scopes-and-scope-descriptors)
+  #     See [the scopes docs](http://flight-manual.atom.io/behind-atom/sections/scoped-settings-scopes-and-scope-descriptors/)
   #     for more information.
   # * `callback` {Function} to call when the value of the key changes.
   #   * `event` {Object}
@@ -515,7 +557,7 @@ class Config
   #   * `scope` (optional) {ScopeDescriptor} describing a path from
   #     the root of the syntax tree to a token. Get one by calling
   #     {editor.getLastCursor().getScopeDescriptor()}
-  #     See [the scopes docs](https://atom.io/docs/latest/behind-atom-scoped-settings-scopes-and-scope-descriptors)
+  #     See [the scopes docs](http://flight-manual.atom.io/behind-atom/sections/scoped-settings-scopes-and-scope-descriptors/)
   #     for more information.
   #
   # Returns the value from Atom's default settings, the user's configuration
@@ -544,7 +586,7 @@ class Config
   #  * `scopeDescriptor` The {ScopeDescriptor} with which the value is associated
   #  * `value` The value for the key-path
   getAll: (keyPath, options) ->
-    {scope, sources} = options if options?
+    {scope} = options if options?
     result = []
 
     if scope?
@@ -590,7 +632,7 @@ class Config
   #   setting to the default value.
   # * `options` (optional) {Object}
   #   * `scopeSelector` (optional) {String}. eg. '.source.ruby'
-  #     See [the scopes docs](https://atom.io/docs/latest/behind-atom-scoped-settings-scopes-and-scope-descriptors)
+  #     See [the scopes docs](http://flight-manual.atom.io/behind-atom/sections/scoped-settings-scopes-and-scope-descriptors/)
   #     for more information.
   #   * `source` (optional) {String} The name of a file with which the setting
   #     is associated. Defaults to the user's config file.
@@ -768,10 +810,11 @@ class Config
         properties[key] ?= {}
         rootSchema = properties[key]
 
-    _.extend rootSchema, schema
-    @setDefaults(keyPath, @extractDefaultsFromSchema(schema))
-    @setScopedDefaultsFromSchema(keyPath, schema)
-    @resetSettingsForSchemaChange()
+    Object.assign rootSchema, schema
+    @transact =>
+      @setDefaults(keyPath, @extractDefaultsFromSchema(schema))
+      @setScopedDefaultsFromSchema(keyPath, schema)
+      @resetSettingsForSchemaChange()
 
   load: ->
     @initializeConfigDirectory()
@@ -853,7 +896,7 @@ class Config
     return if @shouldNotAccessFileSystem()
 
     allSettings = {'*': @settings}
-    allSettings = _.extend allSettings, @scopedSettingsStore.propertiesForSource(@getUserConfigPath())
+    allSettings = Object.assign allSettings, @scopedSettingsStore.propertiesForSource(@getUserConfigPath())
     allSettings = sortObject(allSettings)
     try
       CSON.writeFileSync(@configFilePath, allSettings)
@@ -941,9 +984,10 @@ class Config
   setDefaults: (keyPath, defaults) ->
     if defaults? and isPlainObject(defaults)
       keys = splitKeyPath(keyPath)
-      for key, childValue of defaults
-        continue unless defaults.hasOwnProperty(key)
-        @setDefaults(keys.concat([key]).join('.'), childValue)
+      @transact =>
+        for key, childValue of defaults
+          continue unless defaults.hasOwnProperty(key)
+          @setDefaults(keys.concat([key]).join('.'), childValue)
     else
       try
         defaults = @makeValueConformToSchema(keyPath, defaults)
@@ -1026,7 +1070,6 @@ class Config
   resetSettingsForSchemaChange: (source=@getUserConfigPath()) ->
     @transact =>
       @settings = @makeValueConformToSchema(null, @settings, suppressException: true)
-      priority = @priorityForSource(source)
       selectorsAndSettings = @scopedSettingsStore.propertiesForSource(source)
       @scopedSettingsStore.removePropertiesForSource(source)
       for scopeSelector, settings of selectorsAndSettings

@@ -1,9 +1,9 @@
-{basename, join} = require 'path'
+{join} = require 'path'
 
 _ = require 'underscore-plus'
 {Emitter, Disposable, CompositeDisposable} = require 'event-kit'
 fs = require 'fs-plus'
-GitRepositoryAsync = require './git-repository-async'
+path = require 'path'
 GitUtils = require 'git-utils'
 
 Task = require './task'
@@ -76,13 +76,6 @@ class GitRepository
     unless @repo?
       throw new Error("No Git repository found searching path: #{path}")
 
-    asyncOptions = _.clone(options)
-    # GitRepository itself will handle these cases by manually calling through
-    # to the async repo.
-    asyncOptions.refreshOnWindowFocus = false
-    asyncOptions.subscribeToBuffers = false
-    @async = GitRepositoryAsync.open(path, asyncOptions)
-
     @statuses = {}
     @upstream = {ahead: 0, behind: 0}
     for submodulePath, submoduleRepo of @repo.submodules
@@ -125,9 +118,9 @@ class GitRepository
       @subscriptions.dispose()
       @subscriptions = null
 
-    if @async?
-      @async.destroy()
-      @async = null
+  # Public: Returns a {Boolean} indicating if this repository has been destroyed.
+  isDestroyed: ->
+    not @repo?
 
   # Public: Invoke the given callback when this GitRepository's destroy() method
   # is invoked.
@@ -245,6 +238,7 @@ class GitRepository
 
   # Public: Returns the git configuration value specified by the key.
   #
+  # * `key`  The {String} key for the configuration to lookup.
   # * `path` An optional {String} path in the repository to get this information
   #   for, only needed if the repository has submodules.
   getConfigValue: (key, path) -> @getRepo(path).getConfigValue(key)
@@ -317,20 +311,17 @@ class GitRepository
   getDirectoryStatus: (directoryPath)  ->
     directoryPath = "#{@relativize(directoryPath)}/"
     directoryStatus = 0
-    for path, status of @statuses
-      directoryStatus |= status if path.indexOf(directoryPath) is 0
+    for statusPath, status of @statuses
+      directoryStatus |= status if statusPath.indexOf(directoryPath) is 0
     directoryStatus
 
   # Public: Get the status of a single path in the repository.
   #
-  # `path` A {String} repository-relative path.
+  # * `path` A {String} repository-relative path.
   #
   # Returns a {Number} representing the status. This value can be passed to
   # {::isStatusModified} or {::isStatusNew} to get more information.
   getPathStatus: (path) ->
-    # Trigger events emitted on the async repo as well
-    @async.refreshStatusForPath(path)
-
     repo = @getRepo(path)
     relativePath = @relativize(path)
     currentPathStatus = @statuses[relativePath] ? 0
@@ -443,8 +434,8 @@ class GitRepository
   # Subscribes to buffer events.
   subscribeToBuffer: (buffer) ->
     getBufferPathStatus = =>
-      if path = buffer.getPath()
-        @getPathStatus(path)
+      if bufferPath = buffer.getPath()
+        @getPathStatus(bufferPath)
 
     bufferSubscriptions = new CompositeDisposable
     bufferSubscriptions.add buffer.onDidSave(getBufferPathStatus)
@@ -475,18 +466,15 @@ class GitRepository
 
   # Refreshes the current git status in an outside process and asynchronously
   # updates the relevant properties.
-  #
-  # Returns a promise that resolves when the repository has been refreshed.
   refreshStatus: ->
-    asyncRefresh = @async.refreshStatus()
-    syncRefresh = new Promise (resolve, reject) =>
-      @handlerPath ?= require.resolve('./repository-status-handler')
+    @handlerPath ?= require.resolve('./repository-status-handler')
 
-      relativeProjectPaths = @project?.getPaths()
-        .map (path) => @relativize(path)
-        .filter (path) -> path.length > 0
+    relativeProjectPaths = @project?.getPaths()
+      .map (projectPath) => @relativize(projectPath)
+      .filter (projectPath) -> projectPath.length > 0 and not path.isAbsolute(projectPath)
 
-      @statusTask?.terminate()
+    @statusTask?.terminate()
+    new Promise (resolve) =>
       @statusTask = Task.once @handlerPath, @getPath(), relativeProjectPaths, ({statuses, upstream, branch, submodules}) =>
         statusesUnchanged = _.isEqual(statuses, @statuses) and
                             _.isEqual(upstream, @upstream) and
@@ -501,9 +489,6 @@ class GitRepository
         for submodulePath, submoduleRepo of @getRepo().submodules
           submoduleRepo.upstream = submodules[submodulePath]?.upstream ? {ahead: 0, behind: 0}
 
-        resolve()
-
         unless statusesUnchanged
           @emitter.emit 'did-change-statuses'
-
-    return Promise.all([asyncRefresh, syncRefresh])
+        resolve()

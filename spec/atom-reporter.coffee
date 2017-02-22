@@ -3,6 +3,7 @@ _ = require 'underscore-plus'
 grim = require 'grim'
 marked = require 'marked'
 listen = require '../src/delegated-listener'
+ipcHelpers = require '../src/ipc-helpers'
 
 formatStackTrace = (spec, message='', stackTrace) ->
   return stackTrace unless stackTrace
@@ -34,6 +35,7 @@ class AtomReporter
 
   constructor: ->
     @element = document.createElement('div')
+    @element.classList.add('spec-reporter-container')
     @element.innerHTML = """
       <div class="spec-reporter">
         <div class="padded pull-right">
@@ -95,7 +97,7 @@ class AtomReporter
     if @failedCount is 1
       @message.textContent = "#{@failedCount} failure"
     else
-      @message.textConent = "#{@failedCount} failures"
+      @message.textContent = "#{@failedCount} failures"
 
   reportSuiteResults: (suite) ->
 
@@ -107,42 +109,6 @@ class AtomReporter
 
   reportSpecStarting: (spec) ->
     @specStarted(spec)
-
-  addDeprecations: (spec) ->
-    deprecations = grim.getDeprecations()
-    @deprecationCount += deprecations.length
-    @deprecations.style.display = '' if @deprecationCount > 0
-    if @deprecationCount is 1
-      @deprecationStatus.textContent = "1 deprecation"
-    else
-      @deprecationStatus.textContent = "#{@deprecationCount} deprecations"
-
-    for deprecation in deprecations
-      @deprecationList.appendChild(@buildDeprecationElement(spec, deprecation))
-
-    grim.clearDeprecations()
-
-  buildDeprecationElement: (spec, deprecation) ->
-    div = document.createElement('div')
-    div.className = 'padded'
-    div.innerHTML = """
-      <div class="result-message fail deprecation-message">
-        #{marked(deprecation.message)}
-      </div>
-    """
-
-    for stack in deprecation.getStacks()
-      fullStack = stack.map ({functionName, location}) ->
-        if functionName is '<unknown>'
-          "  at #{location}"
-        else
-          "  at #{functionName} (#{location})"
-      pre = document.createElement('pre')
-      pre.className = 'stack-trace padded'
-      pre.textContent = formatStackTrace(spec, deprecation.message, fullStack.join('\n'))
-      div.appendChild(pre)
-
-    div
 
   handleEvents: ->
     listen document, 'click', '.spec-toggle', (event) ->
@@ -172,7 +138,7 @@ class AtomReporter
     listen document, 'click', '.stack-trace', (event) ->
       event.currentTarget.classList.toggle('expanded')
 
-    @reloadButton.addEventListener('click', -> require('ipc').send('call-window-method', 'restart'))
+    @reloadButton.addEventListener('click', -> ipcHelpers.call('window-method', 'reload'))
 
   updateSpecCounts: ->
     if @skippedCount
@@ -196,6 +162,21 @@ class AtomReporter
     time = "0#{time}" if time.length < 3
     @time.textContent = "#{time[0...-2]}.#{time[-2..]}s"
 
+  specTitle: (spec) ->
+    parentDescs = []
+    s = spec.suite
+    while s
+      parentDescs.unshift(s.description)
+      s = s.parentSuite
+
+    suiteString = ""
+    indent = ""
+    for desc in parentDescs
+      suiteString += indent + desc + "\n"
+      indent += "  "
+
+    "#{suiteString} #{indent} it #{spec.description}"
+
   addSpecs: (specs) ->
     coreSpecs = 0
     bundledPackageSpecs = 0
@@ -203,6 +184,7 @@ class AtomReporter
     for spec in specs
       symbol = document.createElement('li')
       symbol.setAttribute('id', "spec-summary-#{spec.id}")
+      symbol.setAttribute('title', @specTitle(spec))
       symbol.className = "spec-summary pending"
       switch spec.specType
         when 'core'
@@ -255,7 +237,6 @@ class AtomReporter
       specView = new SpecResultView(spec)
       specView.attach()
       @failedCount++
-    @addDeprecations(spec)
 
 class SuiteResultView
   constructor: (@suite) ->

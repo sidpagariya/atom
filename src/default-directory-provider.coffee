@@ -15,9 +15,9 @@ class DefaultDirectoryProvider
   # * {Directory} if the given URI is compatible with this provider.
   # * `null` if the given URI is not compatibile with this provider.
   directoryForURISync: (uri) ->
-    normalizedPath = path.normalize(uri)
-    {protocol} = url.parse(uri)
-    directoryPath = if protocol?
+    normalizedPath = @normalizePath(uri)
+    {host} = url.parse(uri)
+    directoryPath = if host
       uri
     else if not fs.isDirectorySync(normalizedPath) and fs.isDirectorySync(path.dirname(normalizedPath))
       path.dirname(normalizedPath)
@@ -26,7 +26,7 @@ class DefaultDirectoryProvider
 
     # TODO: Stop normalizing the path in pathwatcher's Directory.
     directory = new Directory(directoryPath)
-    if protocol?
+    if host
       directory.path = directoryPath
       if fs.isCaseInsensitive()
         directory.lowerCasePath = directoryPath.toLowerCase()
@@ -42,3 +42,17 @@ class DefaultDirectoryProvider
   # * `null` if the given URI is not compatibile with this provider.
   directoryForURI: (uri) ->
     Promise.resolve(@directoryForURISync(uri))
+
+  # Public: Normalizes path.
+  #
+  # * `uri` {String} The path that should be normalized.
+  #
+  # Returns a {String} with normalized path.
+  normalizePath: (uri) ->
+    # Normalize disk drive letter on Windows to avoid opening two buffers for the same file
+    pathWithNormalizedDiskDriveLetter =
+      if process.platform is 'win32' and matchData = uri.match(/^([a-z]):/)
+        "#{matchData[1].toUpperCase()}#{uri.slice(1)}"
+      else
+        uri
+    path.normalize(pathWithNormalizedDiskDriveLetter)

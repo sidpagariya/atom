@@ -1,8 +1,12 @@
-ipc = require 'ipc'
+{ipcRenderer} = require 'electron'
 path = require 'path'
 temp = require('temp').track()
+{Disposable} = require 'event-kit'
 
 describe "WorkspaceElement", ->
+  afterEach ->
+    temp.cleanupSync()
+
   describe "when the workspace element is focused", ->
     it "transfers focus to the active pane", ->
       workspaceElement = atom.views.getView(atom.workspace)
@@ -17,9 +21,11 @@ describe "WorkspaceElement", ->
     it "has a class based on the style of the scrollbar", ->
       observeCallback = null
       scrollbarStyle = require 'scrollbar-style'
-      spyOn(scrollbarStyle, 'observePreferredScrollbarStyle').andCallFake (cb) -> observeCallback = cb
-      workspaceElement = atom.views.getView(atom.workspace)
+      spyOn(scrollbarStyle, 'observePreferredScrollbarStyle').andCallFake (cb) ->
+        observeCallback = cb
+        new Disposable(->)
 
+      workspaceElement = atom.views.getView(atom.workspace)
       observeCallback('legacy')
       expect(workspaceElement.className).toMatch 'scrollbars-visible-always'
 
@@ -27,7 +33,7 @@ describe "WorkspaceElement", ->
       expect(workspaceElement).toHaveClass 'scrollbars-visible-when-scrolling'
 
   describe "editor font styling", ->
-    [editor, editorElement] = []
+    [editor, editorElement, workspaceElement] = []
 
     beforeEach ->
       waitsForPromise -> atom.workspace.open('sample.js')
@@ -47,9 +53,14 @@ describe "WorkspaceElement", ->
 
     it "updates the font-family based on the 'editor.fontFamily' config value", ->
       initialCharWidth = editor.getDefaultCharWidth()
-      expect(getComputedStyle(editorElement).fontFamily).toBe atom.config.get('editor.fontFamily')
+      fontFamily = atom.config.get('editor.fontFamily')
+      fontFamily += ', "Apple Color Emoji"' if process.platform is 'darwin'
+      expect(getComputedStyle(editorElement).fontFamily).toBe fontFamily
+
       atom.config.set('editor.fontFamily', 'sans-serif')
-      expect(getComputedStyle(editorElement).fontFamily).toBe atom.config.get('editor.fontFamily')
+      fontFamily = atom.config.get('editor.fontFamily')
+      fontFamily += ', "Apple Color Emoji"' if process.platform is 'darwin'
+      expect(getComputedStyle(editorElement).fontFamily).toBe fontFamily
       expect(editor.getDefaultCharWidth()).not.toBe initialCharWidth
 
     it "updates the line-height based on the 'editor.lineHeight' config value", ->
@@ -57,6 +68,44 @@ describe "WorkspaceElement", ->
       atom.config.set('editor.lineHeight', '30px')
       expect(getComputedStyle(editorElement).lineHeight).toBe atom.config.get('editor.lineHeight')
       expect(editor.getLineHeightInPixels()).not.toBe initialLineHeight
+
+    it "increases or decreases the font size when a ctrl-mousewheel event occurs", ->
+      atom.config.set('editor.zoomFontWhenCtrlScrolling', true)
+      atom.config.set('editor.fontSize', 12)
+
+      # Zoom out
+      editorElement.querySelector('span').dispatchEvent(new WheelEvent('mousewheel', {
+        wheelDeltaY: -10,
+        ctrlKey: true
+      }))
+      expect(atom.config.get('editor.fontSize')).toBe(11)
+
+      # Zoom in
+      editorElement.querySelector('span').dispatchEvent(new WheelEvent('mousewheel', {
+        wheelDeltaY: 10,
+        ctrlKey: true
+      }))
+      expect(atom.config.get('editor.fontSize')).toBe(12)
+
+      # Not on an atom-text-editor
+      workspaceElement.dispatchEvent(new WheelEvent('mousewheel', {
+        wheelDeltaY: 10,
+        ctrlKey: true
+      }))
+      expect(atom.config.get('editor.fontSize')).toBe(12)
+
+      # No ctrl key
+      editorElement.querySelector('span').dispatchEvent(new WheelEvent('mousewheel', {
+        wheelDeltaY: 10,
+      }))
+      expect(atom.config.get('editor.fontSize')).toBe(12)
+
+      atom.config.set('editor.zoomFontWhenCtrlScrolling', false)
+      editorElement.querySelector('span').dispatchEvent(new WheelEvent('mousewheel', {
+        wheelDeltaY: 10,
+        ctrlKey: true
+      }))
+      expect(atom.config.get('editor.fontSize')).toBe(12)
 
   describe 'panel containers', ->
     it 'inserts panel container elements in the correct places in the DOM', ->
@@ -127,35 +176,35 @@ describe "WorkspaceElement", ->
   describe "the 'window:run-package-specs' command", ->
     it "runs the package specs for the active item's project path, or the first project path", ->
       workspaceElement = atom.views.getView(atom.workspace)
-      spyOn(ipc, 'send')
+      spyOn(ipcRenderer, 'send')
 
       # No project paths. Don't try to run specs.
       atom.commands.dispatch(workspaceElement, "window:run-package-specs")
-      expect(ipc.send).not.toHaveBeenCalledWith("run-package-specs")
+      expect(ipcRenderer.send).not.toHaveBeenCalledWith("run-package-specs")
 
       projectPaths = [temp.mkdirSync("dir1-"), temp.mkdirSync("dir2-")]
       atom.project.setPaths(projectPaths)
 
       # No active item. Use first project directory.
       atom.commands.dispatch(workspaceElement, "window:run-package-specs")
-      expect(ipc.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[0], "spec"))
-      ipc.send.reset()
+      expect(ipcRenderer.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[0], "spec"))
+      ipcRenderer.send.reset()
 
       # Active item doesn't implement ::getPath(). Use first project directory.
       item = document.createElement("div")
       atom.workspace.getActivePane().activateItem(item)
       atom.commands.dispatch(workspaceElement, "window:run-package-specs")
-      expect(ipc.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[0], "spec"))
-      ipc.send.reset()
+      expect(ipcRenderer.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[0], "spec"))
+      ipcRenderer.send.reset()
 
       # Active item has no path. Use first project directory.
       item.getPath = -> null
       atom.commands.dispatch(workspaceElement, "window:run-package-specs")
-      expect(ipc.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[0], "spec"))
-      ipc.send.reset()
+      expect(ipcRenderer.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[0], "spec"))
+      ipcRenderer.send.reset()
 
       # Active item has path. Use project path for item path.
       item.getPath = -> path.join(projectPaths[1], "a-file.txt")
       atom.commands.dispatch(workspaceElement, "window:run-package-specs")
-      expect(ipc.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[1], "spec"))
-      ipc.send.reset()
+      expect(ipcRenderer.send).toHaveBeenCalledWith("run-package-specs", path.join(projectPaths[1], "spec"))
+      ipcRenderer.send.reset()

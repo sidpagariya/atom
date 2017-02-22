@@ -49,7 +49,7 @@ if process.env.CI
 else
   jasmine.getEnv().defaultTimeoutInterval = 5000
 
-{resourcePath, testPaths} = atom.getLoadSettings()
+{testPaths} = atom.getLoadSettings()
 
 if specPackagePath = FindParentDir.sync(testPaths[0], 'package.json')
   packageMetadata = require(path.join(specPackagePath, 'package.json'))
@@ -61,8 +61,6 @@ else
   specProjectPath = path.join(__dirname, 'fixtures')
 
 beforeEach ->
-  documentTitle = null
-
   atom.project.setPaths([specProjectPath])
 
   window.resetTimeouts()
@@ -87,7 +85,6 @@ beforeEach ->
   atom.config.set "editor.autoIndent", false
   atom.config.set "core.disabledPackages", ["package-that-throws-an-exception",
     "package-with-broken-package-json", "package-with-broken-keymap"]
-  atom.config.set "editor.useShadowDOM", true
   advanceClock(1000)
   window.setTimeout.reset()
 
@@ -108,21 +105,22 @@ beforeEach ->
   addCustomMatchers(this)
 
 afterEach ->
+  ensureNoDeprecatedFunctionCalls()
+  ensureNoDeprecatedStylesheets()
   atom.reset()
-
   document.getElementById('jasmine-content').innerHTML = '' unless window.debugContent
-
-  ensureNoPathSubscriptions()
+  warnIfLeakingPathSubscriptions()
   waits(0) # yield to ui thread to make screen update more frequently
 
-ensureNoPathSubscriptions = ->
+warnIfLeakingPathSubscriptions = ->
   watchedPaths = pathwatcher.getWatchedPaths()
-  pathwatcher.closeAllWatchers()
   if watchedPaths.length > 0
-    throw new Error("Leaking subscriptions for paths: " + watchedPaths.join(", "))
+    console.error("WARNING: Leaking subscriptions for paths: " + watchedPaths.join(", "))
+  pathwatcher.closeAllWatchers()
 
-ensureNoDeprecatedFunctionsCalled = ->
-  deprecations = Grim.getDeprecations()
+ensureNoDeprecatedFunctionCalls = ->
+  deprecations = _.clone(Grim.getDeprecations())
+  Grim.clearDeprecations()
   if deprecations.length > 0
     originalPrepareStackTrace = Error.prepareStackTrace
     Error.prepareStackTrace = (error, stack) ->
@@ -139,8 +137,18 @@ ensureNoDeprecatedFunctionsCalled = ->
     error = new Error("Deprecated function(s) #{deprecations.map(({originName}) -> originName).join ', '}) were called.")
     error.stack
     Error.prepareStackTrace = originalPrepareStackTrace
-
     throw error
+
+ensureNoDeprecatedStylesheets = ->
+  deprecations = _.clone(atom.styles.getDeprecations())
+  atom.styles.clearDeprecations()
+  for sourcePath, deprecation of deprecations
+    title =
+      if sourcePath isnt 'undefined'
+        "Deprecated stylesheet at '#{sourcePath}':"
+      else
+        "Deprecated stylesheet:"
+    throw new Error("#{title}\n#{deprecation.message}")
 
 emitObject = jasmine.StringPrettyPrinter.prototype.emitObject
 jasmine.StringPrettyPrinter.prototype.emitObject = (obj) ->
@@ -157,23 +165,33 @@ jasmine.attachToDOM = (element) ->
   jasmineContent = document.querySelector('#jasmine-content')
   jasmineContent.appendChild(element) unless jasmineContent.contains(element)
 
-deprecationsSnapshot = null
+grimDeprecationsSnapshot = null
+stylesDeprecationsSnapshot = null
 jasmine.snapshotDeprecations = ->
-  deprecationsSnapshot = _.clone(Grim.deprecations)
+  grimDeprecationsSnapshot = _.clone(Grim.deprecations)
+  stylesDeprecationsSnapshot = _.clone(atom.styles.deprecationsBySourcePath)
 
 jasmine.restoreDeprecationsSnapshot = ->
-  Grim.deprecations = deprecationsSnapshot
+  Grim.deprecations = grimDeprecationsSnapshot
+  atom.styles.deprecationsBySourcePath = stylesDeprecationsSnapshot
 
 jasmine.useRealClock = ->
   jasmine.unspy(window, 'setTimeout')
   jasmine.unspy(window, 'clearTimeout')
   jasmine.unspy(_._, 'now')
 
+# The clock is halfway mocked now in a sad and terrible way... only setTimeout
+# and clearTimeout are included. This method will also include setInterval. We
+# would do this everywhere if didn't cause us to break a bunch of package tests.
+jasmine.useMockClock = ->
+  spyOn(window, 'setInterval').andCallFake(fakeSetInterval)
+  spyOn(window, 'clearInterval').andCallFake(fakeClearInterval)
+
 addCustomMatchers = (spec) ->
   spec.addMatchers
     toBeInstanceOf: (expected) ->
-      notText = if @isNot then " not" else ""
-      this.message = => "Expected #{jasmine.pp(@actual)} to#{notText} be instance of #{expected.name} class"
+      beOrNotBe = if @isNot then "not be" else "be"
+      this.message = => "Expected #{jasmine.pp(@actual)} to #{beOrNotBe} instance of #{expected.name} class"
       @actual instanceof expected
 
     toHaveLength: (expected) ->
@@ -181,31 +199,37 @@ addCustomMatchers = (spec) ->
         this.message = => "Expected object #{@actual} has no length method"
         false
       else
-        notText = if @isNot then " not" else ""
-        this.message = => "Expected object with length #{@actual.length} to#{notText} have length #{expected}"
+        haveOrNotHave = if @isNot then "not have" else "have"
+        this.message = => "Expected object with length #{@actual.length} to #{haveOrNotHave} length #{expected}"
         @actual.length is expected
 
     toExistOnDisk: (expected) ->
-      notText = this.isNot and " not" or ""
-      @message = -> return "Expected path '" + @actual + "'" + notText + " to exist."
+      toOrNotTo = this.isNot and "not to" or "to"
+      @message = -> return "Expected path '#{@actual}' #{toOrNotTo} exist."
       fs.existsSync(@actual)
 
     toHaveFocus: ->
-      notText = this.isNot and " not" or ""
+      toOrNotTo = this.isNot and "not to" or "to"
       if not document.hasFocus()
         console.error "Specs will fail because the Dev Tools have focus. To fix this close the Dev Tools or click the spec runner."
 
-      @message = -> return "Expected element '" + @actual + "' or its descendants" + notText + " to have focus."
+      @message = -> return "Expected element '#{@actual}' or its descendants #{toOrNotTo} have focus."
       element = @actual
       element = element.get(0) if element.jquery
       element is document.activeElement or element.contains(document.activeElement)
 
     toShow: ->
-      notText = if @isNot then " not" else ""
+      toOrNotTo = this.isNot and "not to" or "to"
       element = @actual
       element = element.get(0) if element.jquery
-      @message = -> return "Expected element '#{element}' or its descendants#{notText} to show."
+      @message = -> return "Expected element '#{element}' or its descendants #{toOrNotTo} show."
       element.style.display in ['block', 'inline-block', 'static', 'fixed']
+
+    toEqualPath: (expected) ->
+      actualPath = path.normalize(@actual)
+      expectedPath = path.normalize(expected)
+      @message = -> return "Expected path '#{actualPath}' to be equal to '#{expectedPath}'."
+      actualPath is expectedPath
 
 window.waitsForPromise = (args...) ->
   label = null
@@ -236,7 +260,7 @@ window.resetTimeouts = ->
   window.timeouts = []
   window.intervalTimeouts = {}
 
-window.fakeSetTimeout = (callback, ms) ->
+window.fakeSetTimeout = (callback, ms=0) ->
   id = ++window.timeoutCount
   window.timeouts.push([id, window.now + ms, callback])
   id

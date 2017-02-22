@@ -1,5 +1,5 @@
 path = require 'path'
-temp = require 'temp'
+temp = require('temp').track()
 CSON = require 'season'
 fs = require 'fs-plus'
 
@@ -9,13 +9,14 @@ describe "Config", ->
   beforeEach ->
     spyOn(atom.config, "load")
     spyOn(atom.config, "save")
-    dotAtomPath = temp.path('dot-atom-dir')
+    dotAtomPath = temp.path('atom-spec-config')
     atom.config.configDirPath = dotAtomPath
     atom.config.enablePersistence = true
     atom.config.configFilePath = path.join(atom.config.configDirPath, "atom.config.cson")
 
   afterEach ->
     atom.config.enablePersistence = false
+    fs.removeSync(dotAtomPath)
 
   describe ".get(keyPath, {scope, sources, excludeSources})", ->
     it "allows a key path's value to be read", ->
@@ -486,8 +487,8 @@ describe "Config", ->
       observeHandler.reset() # clear the initial call
       atom.config.set('foo.bar.baz', "value 2")
       expect(observeHandler).toHaveBeenCalledWith("value 2")
-      observeHandler.reset()
 
+      observeHandler.reset()
       atom.config.set('foo.bar.baz', "value 1")
       expect(observeHandler).toHaveBeenCalledWith("value 1")
       advanceClock(100) # complete pending save that was requested in ::set
@@ -1079,6 +1080,7 @@ describe "Config", ->
 
       describe "when the configDirPath doesn't exist", ->
         it "copies the contents of dot-atom to ~/.atom", ->
+          return if process.platform is 'win32' # Flakey test on Win32
           initializationDone = false
           jasmine.unspy(window, "setTimeout")
           atom.config.initializeConfigDirectory ->
@@ -1620,6 +1622,16 @@ describe "Config", ->
           color = atom.config.get('foo.bar.aColor')
           expect(color.toHexString()).toBe '#ff0000'
           expect(color.toRGBAString()).toBe 'rgba(255, 0, 0, 1)'
+
+          color.red = 11
+          color.green = 11
+          color.blue = 124
+          color.alpha = 1
+          atom.config.set('foo.bar.aColor', color)
+
+          color = atom.config.get('foo.bar.aColor')
+          expect(color.toHexString()).toBe '#0b0b7c'
+          expect(color.toRGBAString()).toBe 'rgba(11, 11, 124, 1)'
 
         it 'coerces various types to a color object', ->
           atom.config.set('foo.bar.aColor', 'red')

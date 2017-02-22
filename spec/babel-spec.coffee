@@ -15,11 +15,11 @@ describe "Babel transpiler support", ->
     CompileCache.setCacheDirectory(temp.mkdirSync('compile-cache'))
     for cacheKey in Object.keys(require.cache)
       if cacheKey.startsWith(path.join(__dirname, 'fixtures', 'babel'))
-        console.log('deleting', cacheKey)
         delete require.cache[cacheKey]
 
   afterEach ->
     CompileCache.setCacheDirectory(originalCacheDir)
+    temp.cleanupSync()
 
   describe 'when a .js file starts with /** @babel */;', ->
     it "transpiles it using babel", ->
